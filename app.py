@@ -21,7 +21,7 @@ def get_connection():
 # ----------------------------
 # Fetch Data from API
 # ----------------------------
-API_KEY = "YOUR_API_KEY"   # 🔑 Replace with your Harvard API key
+API_KEY = "a1173ce4-98ad-4123-b7b2-137a0053f7c9"   # 🔑 Replace with your Harvard API key
 BASE_URL = "https://api.harvardartmuseums.org/object"
 
 def fetch_data(classification, rows=2500):
