@@ -1,114 +1,219 @@
 import streamlit as st
+import requests
 import sqlite3
 import pandas as pd
 
-# -----------------------
-# DB Connection Function
-# -----------------------
+# ----------------------------
+# App Layout
+# ----------------------------
+st.set_page_config(page_title="Harvard Artifacts Explorer", layout="wide")
+st.title("🏺 Harvard Artifacts Explorer")
+st.write("Explore, collect, and analyze artifacts from the Harvard Art Museums API.")
+
+# ----------------------------
+# DB Setup
+# ----------------------------
+DB_FILE = "artifacts.db"
+
+def get_connection():
+    return sqlite3.connect(DB_FILE)
+
+# ----------------------------
+# Fetch Data from API
+# ----------------------------
+API_KEY = "YOUR_API_KEY"   # 🔑 Replace with your Harvard API key
+BASE_URL = "https://api.harvardartmuseums.org/object"
+
+def fetch_data(classification, rows=2500):
+    records = []
+    page = 1
+    collected = 0
+
+    st.info(f"Fetching {rows} records for {classification}...")
+
+    while collected < rows:
+        params = {
+            "apikey": API_KEY,
+            "classification": classification,
+            "size": 100,
+            "page": page
+        }
+        response = requests.get(BASE_URL, params=params)
+        if response.status_code != 200:
+            st.error(f"❌ API request failed: {response.status_code}")
+            break
+
+        data = response.json()
+        if "records" not in data:
+            break
+
+        records.extend(data["records"])
+        collected = len(records)
+        page += 1
+
+        if len(data["records"]) == 0:
+            break
+
+    return records[:rows]
+
+# ----------------------------
+# SQL Table Creation
+# ----------------------------
+def create_tables():
+    conn = get_connection()
+    cur = conn.cursor()
+
+    cur.execute("""CREATE TABLE IF NOT EXISTS artifact_metadata (
+        id INTEGER PRIMARY KEY,
+        title TEXT,
+        culture TEXT,
+        period TEXT,
+        century TEXT,
+        medium TEXT,
+        dimensions TEXT,
+        description TEXT,
+        department TEXT,
+        classification TEXT,
+        accessionyear INTEGER,
+        accessionmethod TEXT
+    )""")
+
+    cur.execute("""CREATE TABLE IF NOT EXISTS artifact_media (
+        objectid INTEGER,
+        imagecount INTEGER,
+        mediacount INTEGER,
+        colorcount INTEGER,
+        rank INTEGER,
+        datebegin INTEGER,
+        dateend INTEGER,
+        FOREIGN KEY (objectid) REFERENCES artifact_metadata(id)
+    )""")
+
+    cur.execute("""CREATE TABLE IF NOT EXISTS artifact_colors (
+        objectid INTEGER,
+        color TEXT,
+        spectrum TEXT,
+        hue TEXT,
+        percent REAL,
+        css3 TEXT,
+        FOREIGN KEY (objectid) REFERENCES artifact_metadata(id)
+    )""")
+
+    conn.commit()
+    conn.close()
+
+# ----------------------------
+# Insert Data into Tables
+# ----------------------------
+def insert_into_db(records):
+    conn = get_connection()
+    cur = conn.cursor()
+
+    for rec in records:
+        # Insert metadata
+        cur.execute("""INSERT OR REPLACE INTO artifact_metadata 
+            (id, title, culture, period, century, medium, dimensions, description, department, classification, accessionyear, accessionmethod)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""", (
+            rec.get("id"),
+            rec.get("title"),
+            rec.get("culture"),
+            rec.get("period"),
+            rec.get("century"),
+            rec.get("medium"),
+            rec.get("dimensions"),
+            rec.get("description"),
+            rec.get("department"),
+            rec.get("classification"),
+            rec.get("accessionyear"),
+            rec.get("accessionmethod")
+        ))
+
+        # Insert media
+        cur.execute("""INSERT INTO artifact_media 
+            (objectid, imagecount, mediacount, colorcount, rank, datebegin, dateend)
+            VALUES (?, ?, ?, ?, ?, ?, ?)""", (
+            rec.get("id"),
+            rec.get("imagecount"),
+            rec.get("mediacount"),
+            rec.get("colorcount"),
+            rec.get("rank"),
+            rec.get("datebegin"),
+            rec.get("dateend")
+        ))
+
+        # Insert colors
+        if "colors" in rec and rec["colors"]:
+            for c in rec["colors"]:
+                cur.execute("""INSERT INTO artifact_colors 
+                    (objectid, color, spectrum, hue, percent, css3)
+                    VALUES (?, ?, ?, ?, ?, ?)""", (
+                    rec.get("id"),
+                    c.get("color"),
+                    c.get("spectrum"),
+                    c.get("hue"),
+                    c.get("percent"),
+                    c.get("css3")
+                ))
+
+    conn.commit()
+    conn.close()
+    st.success(f"✅ Inserted {len(records)} records into database")
+
+# ----------------------------
+# Run Queries
+# ----------------------------
 def run_query(query):
-    conn = sqlite3.connect("artifacts.db")
+    conn = get_connection()
     df = pd.read_sql_query(query, conn)
     conn.close()
     return df
 
-# -----------------------
-# Streamlit App Layout
-# -----------------------
-st.set_page_config(page_title="Harvard Artifacts Explorer", layout="wide")
+# ----------------------------
+# Streamlit Interface
+# ----------------------------
+st.subheader("⚙️ Data Collection")
 
-st.title("🏺 Harvard Artifacts Explorer")
-st.write("Explore metadata, media, and colors from the Harvard Art Museums API dataset.")
+classification = st.selectbox("Select a classification:", 
+    ["Paintings", "Sculpture", "Coins", "Drawings", "Prints", "Jewellery"])
 
-# -----------------------
-# Predefined Queries
-# -----------------------
+if st.button("Collect Data"):
+    records = fetch_data(classification, 2500)
+    st.session_state["records"] = records
+    st.success(f"✅ Collected {len(records)} {classification}")
+
+if "records" in st.session_state:
+    if st.button("Show Data"):
+        df = pd.DataFrame(st.session_state["records"])
+        st.dataframe(df.head(20))
+
+    if st.button("Insert into SQL"):
+        create_tables()
+        insert_into_db(st.session_state["records"])
+
+# ----------------------------
+# Query & Visualization
+# ----------------------------
+st.subheader("📊 Query & Visualization")
+
 queries = {
-    # 🏺 artifact_metadata
     "Artifacts from 11th century Byzantine culture":
         "SELECT id, title, culture, century FROM artifact_metadata WHERE century = '11th century' AND culture = 'Byzantine';",
-
     "Unique cultures":
         "SELECT DISTINCT culture FROM artifact_metadata WHERE culture IS NOT NULL;",
-
-    "Artifacts from Archaic Period":
-        "SELECT id, title, period FROM artifact_metadata WHERE period = 'Archaic Period';",
-
-    "Artifact titles ordered by accession year (DESC)":
-        "SELECT title, accessionyear FROM artifact_metadata ORDER BY accessionyear DESC;",
-
     "Count of artifacts per department":
         "SELECT department, COUNT(*) as total FROM artifact_metadata GROUP BY department;",
-
-    # 🖼️ artifact_media
-    "Artifacts with more than 1 image":
-        "SELECT objectid, imagecount FROM artifact_media WHERE imagecount > 1;",
-
-    "Average rank of artifacts":
-        "SELECT AVG(rank) as avg_rank FROM artifact_media;",
-
-    "Artifacts with higher colorcount than mediacount":
-        "SELECT objectid, colorcount, mediacount FROM artifact_media WHERE colorcount > mediacount;",
-
-    "Artifacts created between 1500 and 1600":
-        "SELECT objectid, datebegin, dateend FROM artifact_media WHERE datebegin >= 1500 AND dateend <= 1600;",
-
-    "Artifacts with no media files":
-        "SELECT COUNT(*) as no_media FROM artifact_media WHERE mediacount = 0;",
-
-    # 🎨 artifact_colors
-    "Distinct hues used":
-        "SELECT DISTINCT hue FROM artifact_colors;",
-
     "Top 5 most used colors":
-        "SELECT color, COUNT(*) as freq FROM artifact_colors GROUP BY color ORDER BY freq DESC LIMIT 5;",
-
-    "Average coverage % per hue":
-        "SELECT hue, AVG(percent) as avg_coverage FROM artifact_colors GROUP BY hue;",
-
-    "Colors for a given artifact ID (example: 12345)":
-        "SELECT objectid, color, hue, percent FROM artifact_colors WHERE objectid = 12345;",
-
-    "Total number of color entries":
-        "SELECT COUNT(*) as total_colors FROM artifact_colors;",
-
-    # 🔗 Join queries
-    "Byzantine artifacts with hues":
-        "SELECT m.title, c.hue FROM artifact_metadata m JOIN artifact_colors c ON m.id = c.objectid WHERE m.culture = 'Byzantine';",
-
-    "Each artifact with its hues":
-        "SELECT m.title, c.hue FROM artifact_metadata m LEFT JOIN artifact_colors c ON m.id = c.objectid;",
-
-    "Titles, cultures, and ranks where period is not null":
-        "SELECT m.title, m.culture, me.rank FROM artifact_metadata m JOIN artifact_media me ON m.id = me.objectid WHERE m.period IS NOT NULL;",
-
-    "Top 10 ranked artifacts with hue 'Grey'":
-        "SELECT m.title, me.rank, c.hue FROM artifact_metadata m JOIN artifact_media me ON m.id = me.objectid JOIN artifact_colors c ON m.id = c.objectid WHERE c.hue = 'Grey' ORDER BY me.rank ASC LIMIT 10;",
-
-    "Artifacts per classification + avg media count":
-        "SELECT m.classification, COUNT(*) as total_artifacts, AVG(me.mediacount) as avg_media FROM artifact_metadata m JOIN artifact_media me ON m.id = me.objectid GROUP BY m.classification;"
+        "SELECT color, COUNT(*) as freq FROM artifact_colors GROUP BY color ORDER BY freq DESC LIMIT 5;"
 }
 
-# -----------------------
-# Query Selector
-# -----------------------
-choice = st.selectbox("📌 Pick a predefined query:", list(queries.keys()))
+choice = st.selectbox("Choose a pre-written query:", list(queries.keys()))
 
-if st.button("Run Predefined Query"):
+if st.button("Run Query"):
     sql = queries[choice]
     df = run_query(sql)
-    st.write(f"### Results for: {choice}")
+    st.write(f"### Results: {choice}")
     st.dataframe(df)
 
-# -----------------------
-# Custom SQL Query
-# -----------------------
-st.subheader("📝 Write Your Own SQL")
-user_query = st.text_area("Enter SQL query here:")
-
-if st.button("Run Custom SQL"):
-    try:
-        df = run_query(user_query)
-        st.write("### Custom Query Results")
-        st.dataframe(df)
-    except Exception as e:
-        st.error(f"❌ Error: {e}")
+    # Example chart
+    if "COUNT" in sql or "freq" in sql:
+        st.bar_chart(df.set_index(df.columns[0]))
