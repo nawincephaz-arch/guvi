@@ -1,219 +1,221 @@
-import streamlit as st
-import requests
-import sqlite3
-import pandas as pd
+import os, time, requests, sqlite3, pandas as pd, streamlit as st
 
-# ----------------------------
-# App Layout
-# ----------------------------
-st.set_page_config(page_title="Harvard Artifacts Explorer", layout="wide")
-st.title("🏺 Harvard Artifacts Explorer")
-st.write("Explore, collect, and analyze artifacts from the Harvard Art Museums API.")
+# ------------------------
+# Config & Theme
+# ------------------------
+st.set_page_config(page_title="Harvard Artifacts Explorer",
+                   page_icon="🏺",
+                   layout="wide")
 
-# ----------------------------
+# Custom CSS
+st.markdown("""
+    <style>
+    .stButton>button {
+        border-radius: 10px;
+        background-color: #4CAF50;
+        color: white;
+        padding: 0.5em 1em;
+        font-weight: 600;
+    }
+    .stButton>button:hover {
+        background-color: #45a049;
+        color: white;
+    }
+    .stAlert {
+        border-radius: 10px;
+    }
+    </style>
+""", unsafe_allow_html=True)
+
+# ------------------------
+# API Setup
+# ------------------------
+BASE_URL = "https://api.harvardartmuseums.org/object"
+
+def get_api_key():
+    key = st.secrets.get("HARVARD_API_KEY", None)
+    if not key:
+        key = os.getenv("HARVARD_API_KEY")
+    if not key:
+        with st.sidebar:
+            key = st.text_input("🔑 Enter Harvard API Key", type="password")
+    return key
+
+def test_api_key(api_key: str) -> bool:
+    try:
+        r = requests.get(BASE_URL, params={"apikey": api_key, "size": 1}, timeout=10)
+        return r.status_code == 200
+    except:
+        return False
+
+# ------------------------
 # DB Setup
-# ----------------------------
+# ------------------------
 DB_FILE = "artifacts.db"
-
 def get_connection():
     return sqlite3.connect(DB_FILE)
 
-# ----------------------------
-# Fetch Data from API
-# ----------------------------
-API_KEY = "a1173ce4-98ad-4123-b7b2-137a0053f7c9"   # 🔑 Replace with your Harvard API key
-BASE_URL = "https://api.harvardartmuseums.org/object"
-
-def fetch_data(classification, rows=2500):
-    records = []
-    page = 1
-    collected = 0
-
-    st.info(f"Fetching {rows} records for {classification}...")
-
-    while collected < rows:
-        params = {
-            "apikey": API_KEY,
-            "classification": classification,
-            "size": 100,
-            "page": page
-        }
-        response = requests.get(BASE_URL, params=params)
-        if response.status_code != 200:
-            st.error(f"❌ API request failed: {response.status_code}")
-            break
-
-        data = response.json()
-        if "records" not in data:
-            break
-
-        records.extend(data["records"])
-        collected = len(records)
-        page += 1
-
-        if len(data["records"]) == 0:
-            break
-
-    return records[:rows]
-
-# ----------------------------
-# SQL Table Creation
-# ----------------------------
 def create_tables():
     conn = get_connection()
     cur = conn.cursor()
-
     cur.execute("""CREATE TABLE IF NOT EXISTS artifact_metadata (
         id INTEGER PRIMARY KEY,
-        title TEXT,
-        culture TEXT,
-        period TEXT,
-        century TEXT,
-        medium TEXT,
-        dimensions TEXT,
-        description TEXT,
-        department TEXT,
-        classification TEXT,
-        accessionyear INTEGER,
-        accessionmethod TEXT
+        title TEXT, culture TEXT, period TEXT, century TEXT,
+        medium TEXT, dimensions TEXT, description TEXT,
+        department TEXT, classification TEXT,
+        accessionyear INTEGER, accessionmethod TEXT
     )""")
-
     cur.execute("""CREATE TABLE IF NOT EXISTS artifact_media (
         objectid INTEGER,
-        imagecount INTEGER,
-        mediacount INTEGER,
-        colorcount INTEGER,
-        rank INTEGER,
-        datebegin INTEGER,
-        dateend INTEGER,
+        imagecount INTEGER, mediacount INTEGER, colorcount INTEGER,
+        rank INTEGER, datebegin INTEGER, dateend INTEGER,
         FOREIGN KEY (objectid) REFERENCES artifact_metadata(id)
     )""")
-
     cur.execute("""CREATE TABLE IF NOT EXISTS artifact_colors (
         objectid INTEGER,
-        color TEXT,
-        spectrum TEXT,
-        hue TEXT,
-        percent REAL,
-        css3 TEXT,
+        color TEXT, spectrum TEXT, hue TEXT,
+        percent REAL, css3 TEXT,
         FOREIGN KEY (objectid) REFERENCES artifact_metadata(id)
     )""")
-
     conn.commit()
     conn.close()
 
-# ----------------------------
-# Insert Data into Tables
-# ----------------------------
+# ------------------------
+# Data Fetching
+# ------------------------
+def fetch_data(classification, rows, api_key):
+    records, page = [], 1
+    bar = st.progress(0)
+    while len(records) < rows:
+        params = {"apikey": api_key, "classification": classification, "size": 100, "page": page}
+        r = requests.get(BASE_URL, params=params, timeout=20)
+        if r.status_code == 429:
+            time.sleep(1)
+            continue
+        if r.status_code != 200:
+            st.error(f"❌ API request failed: {r.status_code}")
+            break
+        data = r.json()
+        chunk = data.get("records", [])
+        if not chunk:
+            break
+        records.extend(chunk)
+        page += 1
+        bar.progress(min(len(records)/rows,1.0))
+        time.sleep(0.2)
+    bar.empty()
+    return records[:rows]
+
 def insert_into_db(records):
     conn = get_connection()
     cur = conn.cursor()
-
     for rec in records:
-        # Insert metadata
-        cur.execute("""INSERT OR REPLACE INTO artifact_metadata 
-            (id, title, culture, period, century, medium, dimensions, description, department, classification, accessionyear, accessionmethod)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""", (
-            rec.get("id"),
-            rec.get("title"),
-            rec.get("culture"),
-            rec.get("period"),
-            rec.get("century"),
-            rec.get("medium"),
-            rec.get("dimensions"),
-            rec.get("description"),
-            rec.get("department"),
-            rec.get("classification"),
-            rec.get("accessionyear"),
-            rec.get("accessionmethod")
-        ))
-
-        # Insert media
-        cur.execute("""INSERT INTO artifact_media 
+        # Metadata
+        cur.execute("""INSERT OR REPLACE INTO artifact_metadata
+            (id, title, culture, period, century, medium, dimensions,
+             description, department, classification,
+             accessionyear, accessionmethod)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+             (rec.get("id"), rec.get("title"), rec.get("culture"),
+              rec.get("period"), rec.get("century"), rec.get("medium"),
+              rec.get("dimensions"), rec.get("description"),
+              rec.get("department"), rec.get("classification"),
+              rec.get("accessionyear"), rec.get("accessionmethod")))
+        # Media
+        cur.execute("""INSERT INTO artifact_media
             (objectid, imagecount, mediacount, colorcount, rank, datebegin, dateend)
-            VALUES (?, ?, ?, ?, ?, ?, ?)""", (
-            rec.get("id"),
-            rec.get("imagecount"),
-            rec.get("mediacount"),
-            rec.get("colorcount"),
-            rec.get("rank"),
-            rec.get("datebegin"),
-            rec.get("dateend")
-        ))
-
-        # Insert colors
+            VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            (rec.get("id"), rec.get("imagecount"), rec.get("mediacount"),
+             rec.get("colorcount"), rec.get("rank"),
+             rec.get("datebegin"), rec.get("dateend")))
+        # Colors
         if "colors" in rec and rec["colors"]:
             for c in rec["colors"]:
-                cur.execute("""INSERT INTO artifact_colors 
+                cur.execute("""INSERT INTO artifact_colors
                     (objectid, color, spectrum, hue, percent, css3)
-                    VALUES (?, ?, ?, ?, ?, ?)""", (
-                    rec.get("id"),
-                    c.get("color"),
-                    c.get("spectrum"),
-                    c.get("hue"),
-                    c.get("percent"),
-                    c.get("css3")
-                ))
-
+                    VALUES (?, ?, ?, ?, ?, ?)""",
+                    (rec.get("id"), c.get("color"), c.get("spectrum"),
+                     c.get("hue"), c.get("percent"), c.get("css3")))
     conn.commit()
     conn.close()
-    st.success(f"✅ Inserted {len(records)} records into database")
 
-# ----------------------------
-# Run Queries
-# ----------------------------
 def run_query(query):
     conn = get_connection()
     df = pd.read_sql_query(query, conn)
     conn.close()
     return df
 
-# ----------------------------
-# Streamlit Interface
-# ----------------------------
-st.subheader("⚙️ Data Collection")
+# ------------------------
+# Sidebar Navigation
+# ------------------------
+st.sidebar.title("📌 Navigation")
+page = st.sidebar.radio("Go to:", ["Home", "Data Collection", "SQL Explorer", "Visualizations"])
 
-classification = st.selectbox("Select a classification:", 
-    ["Paintings", "Sculpture", "Coins", "Drawings", "Prints", "Jewellery"])
+api_key = get_api_key()
+if not api_key:
+    st.sidebar.warning("🔑 Add API key to start.")
+    st.stop()
+elif not test_api_key(api_key):
+    st.sidebar.error("❌ Invalid API Key")
+    st.stop()
 
-if st.button("Collect Data"):
-    records = fetch_data(classification, 2500)
-    st.session_state["records"] = records
-    st.success(f"✅ Collected {len(records)} {classification}")
+# ------------------------
+# Pages
+# ------------------------
+if page == "Home":
+    st.header("🏺 Welcome to the Harvard Artifacts Explorer")
+    st.markdown("""
+    This app lets you:
+    - Collect artifacts from the Harvard Art Museum API  
+    - Store them into SQLite (3 linked tables)  
+    - Run SQL queries interactively  
+    - Visualize data in charts  
+    """)
 
-if "records" in st.session_state:
-    if st.button("Show Data"):
-        df = pd.DataFrame(st.session_state["records"])
-        st.dataframe(df.head(20))
+elif page == "Data Collection":
+    st.header("📥 Collect & Store Data")
+    classification = st.selectbox("Select Classification", ["Paintings", "Sculpture", "Coins", "Drawings", "Prints", "Jewellery"])
+    rows = st.slider("Number of records", 100, 2500, 500, 100)
+    if st.button("Collect Data"):
+        records = fetch_data(classification, rows, api_key)
+        st.session_state["records"] = records
+        st.success(f"✅ Collected {len(records)} records for {classification}")
+    if "records" in st.session_state:
+        st.write("### Preview:")
+        st.dataframe(pd.DataFrame(st.session_state["records"]).head(10))
+        if st.button("Insert into Database"):
+            create_tables()
+            insert_into_db(st.session_state["records"])
+            st.success("💾 Data inserted into SQLite")
 
-    if st.button("Insert into SQL"):
-        create_tables()
-        insert_into_db(st.session_state["records"])
+elif page == "SQL Explorer":
+    st.header("🔍 SQL Queries")
+    queries = {
+        "Artifacts from 11th century Byzantine culture":
+            "SELECT id, title, culture, century FROM artifact_metadata WHERE century = '11th century' AND culture = 'Byzantine';",
+        "Unique cultures":
+            "SELECT DISTINCT culture FROM artifact_metadata WHERE culture IS NOT NULL;",
+        "Artifacts per department":
+            "SELECT department, COUNT(*) as total FROM artifact_metadata GROUP BY department;",
+        "Top 5 most used colors":
+            "SELECT color, COUNT(*) as freq FROM artifact_colors GROUP BY color ORDER BY freq DESC LIMIT 5;"
+    }
+    choice = st.selectbox("Choose query", list(queries.keys()))
+    if st.button("Run Query"):
+        df = run_query(queries[choice])
+        st.dataframe(df)
+        if "COUNT" in queries[choice] or "freq" in queries[choice]:
+            st.bar_chart(df.set_index(df.columns[0]))
 
-# ----------------------------
-# Query & Visualization
-# ----------------------------
-st.subheader("📊 Query & Visualization")
+elif page == "Visualizations":
+    st.header("📊 Quick Visuals")
+    st.write("Visual insights from database")
+    q1 = "SELECT department, COUNT(*) as total FROM artifact_metadata GROUP BY department ORDER BY total DESC LIMIT 10;"
+    df1 = run_query(q1)
+    st.subheader("Top Departments by Artifact Count")
+    st.bar_chart(df1.set_index("department"))
 
-queries = {
-    "Artifacts from 11th century Byzantine culture":
-        "SELECT id, title, culture, century FROM artifact_metadata WHERE century = '11th century' AND culture = 'Byzantine';",
-    "Unique cultures":
-        "SELECT DISTINCT culture FROM artifact_metadata WHERE culture IS NOT NULL;",
-    "Count of artifacts per department":
-        "SELECT department, COUNT(*) as total FROM artifact_metadata GROUP BY department;",
-    "Top 5 most used colors":
-        "SELECT color, COUNT(*) as freq FROM artifact_colors GROUP BY color ORDER BY freq DESC LIMIT 5;"
-}
-
-choice = st.selectbox("Choose a pre-written query:", list(queries.keys()))
-
-if st.button("Run Query"):
-    sql = queries[choice]
-    df = run_query(sql)
-    st.write(f"### Results: {choice}")
-    st.dataframe(df)
-
-    # Example chart
-    if "COUNT" in sql or "freq" in sql:
-        st.bar_chart(df.set_index(df.columns[0]))
+    q2 = "SELECT hue, AVG(percent) as avg_cov FROM artifact_colors GROUP BY hue ORDER BY avg_cov DESC LIMIT 10;"
+    df2 = run_query(q2)
+    st.subheader("Average Color Coverage by Hue")
+    st.bar_chart(df2.set_index("hue"))
